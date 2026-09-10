@@ -68,6 +68,15 @@ def get_date_block(lines, target_date):
         )
         if looks_like_next_date_heading:
             break
+
+        # MODS lists their after-midnight showing (technically the next
+        # calendar day, ~1:00 a.m.) under the previous day's heading, e.g.
+        # "** AFTER MIDNIGHT SHOWING - Please arrive on Thursday night **".
+        # That showing isn't really "on" the target date, so stop collecting
+        # once we hit this marker rather than including it in the block.
+        if "AFTER MIDNIGHT" in line.upper():
+            break
+
         block.append(line)
 
     return block
