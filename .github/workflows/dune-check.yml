@@ -8,6 +8,12 @@ on:
 permissions:
   contents: write
 
+# Prevents a manual run and a scheduled run from overlapping and both trying
+# to push a state.txt update at the same time — runs queue up instead.
+concurrency:
+  group: dune-monitor
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -37,8 +43,11 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           if git diff --quiet state.txt; then
             echo "No state change."
-          else
-            git add state.txt
-            git commit -m "Update availability state"
-            git push
+            exit 0
           fi
+          git add state.txt
+          git commit -m "Update availability state"
+          # Safety net: pull any newer remote commits before pushing, in case
+          # something still slips past the concurrency lock.
+          git pull --rebase origin main
+          git push
