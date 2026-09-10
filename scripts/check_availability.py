@@ -1,6 +1,7 @@
 """
 Checks https://mods.org/showtimes/ for a target date and emails you (via Gmail
-SMTP) the first time a showing on that date stops being marked "SOLD OUT."
+SMTP) the first time a showing on that date has a real, clickable ticket link
+(i.e. is not sold out).
 
 Required environment variables:
     GMAIL_ADDRESS        - Gmail address to send from
@@ -8,8 +9,8 @@ Required environment variables:
 
 Optional environment variables:
     NOTIFY_EMAIL   - where to send the alert (defaults to GMAIL_ADDRESS)
-    TARGET_DATE    - date heading text to look for (default: "December 17, 2026")
-    MOVIE_KEYWORD  - substring identifying the movie's showtime lines
+    TARGET_DATE    - date heading substring to look for (default: "December 17, 2026")
+    MOVIE_KEYWORD  - substring identifying the movie's showtime rows
                      (default: "Dune: Part Three")
     STATE_FILE     - path to the state-tracking file (default: "state.txt")
 """
@@ -27,6 +28,7 @@ SHOWTIMES_URL = "https://mods.org/showtimes/"
 TARGET_DATE = os.environ.get("TARGET_DATE", "December 17, 2026")
 MOVIE_KEYWORD = os.environ.get("MOVIE_KEYWORD", "Dune: Part Three")
 STATE_FILE = os.environ.get("STATE_FILE", "state.txt")
+TICKET_DOMAIN = "blackbaudhosting"
 
 GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
@@ -34,67 +36,77 @@ NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", GMAIL_ADDRESS)
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 YEAR_PATTERN = re.compile(r"\b20\d{2}\b")
+TIME_PATTERN = re.compile(r"\b\d{1,2}:\d{2}\s*[ap]\.?m\.?", re.IGNORECASE)
 
 
-def fetch_page_lines():
+def fetch_soup():
     resp = requests.get(
         SHOWTIMES_URL,
         timeout=30,
         headers={"User-Agent": "Mozilla/5.0 (compatible; ShowtimeMonitor/1.0)"},
     )
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-    text = soup.get_text("\n")
-    return [line.strip() for line in text.split("\n") if line.strip()]
+    return BeautifulSoup(resp.text, "html.parser")
 
 
-def get_date_block(lines, target_date):
-    """Return the lines between the target date heading and the next date heading."""
-    start = None
-    for i, line in enumerate(lines):
-        if target_date in line:
-            start = i
-            break
+def is_date_heading_row(row_text):
+    """A heading row names a weekday + year but has no showtime (no a.m./p.m.)."""
+    return (
+        any(day in row_text for day in WEEKDAYS)
+        and YEAR_PATTERN.search(row_text)
+        and not TIME_PATTERN.search(row_text)
+    )
 
-    if start is None:
-        return None
 
-    block = []
-    for line in lines[start + 1:]:
-        looks_like_next_date_heading = (
-            YEAR_PATTERN.search(line)
-            and any(day in line for day in WEEKDAYS)
-            and target_date not in line
-        )
-        if looks_like_next_date_heading:
-            break
+def find_available_showtimes(soup, target_date, movie_keyword):
+    """
+    Walk the showtimes table row by row, tracking which date section we're in.
+    A showing counts as "available" only if its row both mentions the movie
+    AND contains a real ticket-purchase hyperlink (MODS removes the link
+    entirely once a showing sells out, which is a much more reliable signal
+    than searching for the literal text "SOLD OUT").
+    """
+    rows = soup.find_all("tr")
+    in_target_section = False
+    available = []
+
+    for row in rows:
+        row_text = row.get_text(" ", strip=True)
+        if not row_text:
+            continue
+
+        if is_date_heading_row(row_text):
+            in_target_section = target_date in row_text
+            continue
+
+        if not in_target_section:
+            continue
 
         # MODS lists their after-midnight showing (technically the next
-        # calendar day, ~1:00 a.m.) under the previous day's heading, e.g.
-        # "** AFTER MIDNIGHT SHOWING - Please arrive on Thursday night **".
-        # That showing isn't really "on" the target date, so stop collecting
-        # once we hit this marker rather than including it in the block.
-        if "AFTER MIDNIGHT" in line.upper():
-            break
+        # calendar day, ~1:00 a.m.) under the previous day's heading via a
+        # marker row. That showing isn't really "on" the target date, so
+        # treat the marker as ending the target-date section.
+        if "AFTER MIDNIGHT" in row_text.upper():
+            in_target_section = False
+            continue
 
-        block.append(line)
+        if movie_keyword not in row_text:
+            continue
 
-    return block
+        link = row.find("a", href=True)
+        has_real_ticket_link = link is not None and TICKET_DOMAIN in link["href"]
 
+        if has_real_ticket_link and "SOLD OUT" not in row_text.upper():
+            available.append(row_text)
 
-def find_available_showtimes(block, movie_keyword):
-    """Lines mentioning the movie that do NOT also say SOLD OUT."""
-    return [
-        line for line in block
-        if movie_keyword in line and "SOLD OUT" not in line.upper()
-    ]
+    return available
 
 
 def send_email(available_lines):
     subject = f"Tickets available: {MOVIE_KEYWORD} on {TARGET_DATE}"
     body = (
-        f"A showing on {TARGET_DATE} at the MODS AutoNation IMAX no longer "
-        f"shows as sold out:\n\n"
+        f"A showing on {TARGET_DATE} at the MODS AutoNation IMAX now has an "
+        f"active ticket link:\n\n"
         + "\n".join(f"- {line}" for line in available_lines)
         + f"\n\nBook here: {SHOWTIMES_URL}\n"
     )
@@ -121,17 +133,8 @@ def write_state(state):
 
 
 def main():
-    lines = fetch_page_lines()
-    block = get_date_block(lines, TARGET_DATE)
-
-    if block is None:
-        print(
-            f"Could not find a section for '{TARGET_DATE}' on the page. "
-            "The date may have rolled off the schedule, or the page layout changed."
-        )
-        sys.exit(0)
-
-    available_lines = find_available_showtimes(block, MOVIE_KEYWORD)
+    soup = fetch_soup()
+    available_lines = find_available_showtimes(soup, TARGET_DATE, MOVIE_KEYWORD)
     previous_state = read_previous_state()
 
     if available_lines:
