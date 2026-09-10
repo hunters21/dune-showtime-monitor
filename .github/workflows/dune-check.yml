@@ -1,0 +1,44 @@
+name: Dune Showtime Monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch: {}       # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run availability check
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+          TARGET_DATE: "December 17, 2026"
+        run: python scripts/check_availability.py
+
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name "showtime-monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if git diff --quiet state.txt; then
+            echo "No state change."
+          else
+            git add state.txt
+            git commit -m "Update availability state"
+            git push
+          fi
