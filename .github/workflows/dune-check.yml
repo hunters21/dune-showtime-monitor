@@ -2,7 +2,7 @@ name: Dune Showtime Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"    # every 5 minutes
+    - cron: "*/5 * * * *"    # every 5 minutes or so
   workflow_dispatch: {}       # lets you trigger a run manually from the Actions tab
 
 permissions:
